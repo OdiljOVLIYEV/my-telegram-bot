@@ -33,7 +33,9 @@ if MONGO_URL:
         cluster = AsyncIOMotorClient(
             MONGO_URL, 
             serverSelectionTimeoutMS=5000,
-            tlsCAFile=certifi.where()
+            tlsCAFile=certifi.where(),
+            tlsAllowInvalidCertificates=True,
+            tls=True
         )
         db = cluster["tg_bot_db"]
         collection = db["games"]
