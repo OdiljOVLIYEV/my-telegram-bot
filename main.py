@@ -73,7 +73,11 @@ dp = Dispatcher()
 
 # --- HEALTH CHECK ---
 async def handle_health(request):
-    return web.Response(text="Bot is running (JSON DB Mode)!")
+    try:
+        await db.client.admin.command('ping')
+        return web.Response(text="Bot is running and MongoDB is connected!", status=200)
+    except Exception as e:
+        return web.Response(text=f"MongoDB Error: {e}", status=500)
 
 async def start_web_server():
     app = web.Application()
