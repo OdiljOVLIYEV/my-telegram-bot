@@ -274,7 +274,10 @@ async def main():
     if not TOKEN:
         logging.error("BOT_TOKEN o'rnatilmagan!")
         return
+    
     try:
+        # Eski ulanishlarni va kutilayotgan xabarlarni tozalash
+        await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
     except Exception as e:
         logging.error(f"Pollingda xato: {e}")
