@@ -53,6 +53,9 @@ class AdminStates(StatesGroup):
     waiting_for_delete = State()
 
 async def get_main_menu():
+    if collection is None:
+        logging.error("Xatolik: MongoDB-ga ulanmagan!")
+        return ReplyKeyboardRemove()
     try:
         logging.info("Bazadan o'yinlar ro'yxati olinmoqda...")
         cursor = collection.find({})
@@ -73,19 +76,28 @@ async def command_start_handler(message: Message, state: FSMContext):
     
     # Link orqali kirilganda (masalan /start gamekey)
     if len(args) > 1:
-        game_key = args[1].lower()
-        game = await collection.find_one({"key": game_key})
-        if game:
-            await message.answer(f"📦 <b>{game['name']}</b> yuborilmoqda...", parse_mode="HTML")
-            for file_id in game['files']:
-                try:
-                    await bot.send_document(chat_id=message.chat.id, document=file_id)
-                    await asyncio.sleep(0.5)
-                except Exception as e:
-                    logging.error(f"Fayl yuborishda xato: {e}")
+        if collection is None:
+            await message.answer("❌ Xatolik: Baza bilan aloqa yo'q!")
             return
-        else:
-            await message.answer("❌ O'yin topilmadi yoki link eskirgan.")
+            
+        game_key = args[1].lower()
+        try:
+            game = await collection.find_one({"key": game_key})
+            if game:
+                await message.answer(f"📦 <b>{game['name']}</b> yuborilmoqda...", parse_mode="HTML")
+                for file_id in game['files']:
+                    try:
+                        await bot.send_document(chat_id=message.chat.id, document=file_id)
+                        await asyncio.sleep(0.5)
+                    except Exception as e:
+                        logging.error(f"Fayl yuborishda xato: {e}")
+                return
+            else:
+                await message.answer("❌ O'yin topilmadi yoki link eskirgan.")
+                return
+        except Exception as e:
+            logging.error(f"MongoDB-dan o'yin qidirishda xato: {e}")
+            await message.answer("❌ Bazaga ulanishda xatolik yuz berdi.")
             return
     
     # Oddiy /start bosilganda
@@ -101,6 +113,9 @@ async def add_game_start(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         await message.answer("Siz admin emassiz!")
         return
+    if collection is None:
+        await message.answer("❌ Xatolik: Baza bilan aloqa o'rnatilmagan (MONGO_URL xato bo'lishi mumkin).")
+        return
     await state.clear()
     await message.answer("📝 Yangi o'yin nomini kiriting:", reply_markup=ReplyKeyboardRemove())
     await state.set_state(AdminStates.waiting_for_name)
@@ -109,9 +124,13 @@ async def add_game_start(message: Message, state: FSMContext):
 async def process_name(message: Message, state: FSMContext):
     if message.text.startswith("/"): return
     
-    existing_game = await collection.find_one({"name": message.text})
-    if existing_game:
-        await message.answer(f"⚠️ '{message.text}' nomli o'yin allaqachon mavjud. Fayllarni yuborsangiz, eski fayllar yangisiga almashtiriladi.")
+    try:
+        existing_game = await collection.find_one({"name": message.text})
+        if existing_game:
+            await message.answer(f"⚠️ '{message.text}' nomli o'yin allaqachon mavjud. Fayllarni yuborsangiz, eski fayllar yangisiga almashtiriladi.")
+    except Exception as e:
+        logging.error(f"process_name ichida xato: {e}")
+        await message.answer("⚠️ Baza bilan aloqa sekin yoki xato, lekin davom ettirishingiz mumkin.")
     
     await state.update_data(game_name=message.text, files=[])
     await message.answer(f"📥 '{message.text}' uchun fayllarni yuboring. Tugatgach /done deb yozing.")
