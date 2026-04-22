@@ -2,146 +2,74 @@ import asyncio
 import logging
 import sys
 import os
-import certifi
-from urllib.parse import quote
+import json
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardRemove
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 from aiohttp import web
-from motor.motor_asyncio import AsyncIOMotorClient
-from pymongo.errors import OperationFailure
 
 # --- SOZLAMALAR ---
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
+MONGO_URL = os.getenv("MONGO_URL") # MongoDB Atlas ulanish kodi
 admin_ids_str = os.getenv("ADMIN_ID", "")
 ADMIN_IDS = [int(i.strip()) for i in admin_ids_str.split(",") if i.strip().isdigit()]
 BOT_USERNAME = os.getenv("BOT_USERNAME", "uz_filtr_fayl_bot")
 PORT = int(os.getenv("PORT", 8080))
-MONGO_RAW_URL = os.getenv("MONGO_URL")
-MONGO_HOST = os.getenv("MONGO_HOST")
-MONGO_USER = os.getenv("MONGO_USER")
-MONGO_PASSWORD = os.getenv("MONGO_PASSWORD")
-MONGO_APP_NAME = os.getenv("MONGO_APP_NAME")
-MONGO_TIMEOUT_MS = int(os.getenv("MONGO_TIMEOUT_MS", 20000))
-MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "tg_bot_db")
-MONGO_COLLECTION_NAME = os.getenv("MONGO_COLLECTION_NAME", "games")
-MONGO_AUTH_SOURCE = os.getenv("MONGO_AUTH_SOURCE")
-MONGO_ALLOW_INVALID_CERTS = os.getenv("MONGO_ALLOW_INVALID_CERTS", "").lower() in {"1", "true", "yes"}
 
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
-# MongoDB ulanishi
-db = None
-collection = None
-cluster = None
-last_db_error = None
+# MongoDB Baza boshqaruvi
+class MongoDatabase:
+    def __init__(self, url):
+        self.client = AsyncIOMotorClient(url)
+        self.db = self.client['tg_bot_db']
+        self.collection = self.db['games']
 
-def build_mongo_url() -> str | None:
-    if MONGO_RAW_URL:
-        return MONGO_RAW_URL
+    async def find_one(self, query):
+        return await self.collection.find_one(query)
 
-    if not (MONGO_HOST and MONGO_USER and MONGO_PASSWORD):
-        return None
+    async def find_all(self):
+        cursor = self.collection.find({})
+        return await cursor.to_list(length=None)
 
-    host = MONGO_HOST.strip()
-    for prefix in ("mongodb+srv://", "mongodb://"):
-        if host.startswith(prefix):
-            host = host[len(prefix):]
-    
-    # Hostdan db name yoki queryni olib tashlash (alohida envlar ishlatilganda)
-    host = host.split("/", 1)[0]
+    async def update_one(self, filter_query, update_data, upsert=False):
+        if upsert:
+            # Yangi ID yaratish (agar yangi o'yin qo'shilayotgan bo'lsa)
+            existing = await self.collection.find_one(filter_query)
+            if not existing:
+                last_game = await self.collection.find_one(sort=[("id", -1)])
+                new_id = (last_game["id"] + 1) if last_game else 1
+                update_data["id"] = new_id
+        
+        await self.collection.update_one(filter_query, {"$set": update_data}, upsert=upsert)
+        return True
 
-    username = quote(MONGO_USER, safe="")
-    password = quote(MONGO_PASSWORD, safe="")
-    
-    # Standart Atlas parametrlari
-    query = "retryWrites=true&w=majority"
-    if MONGO_APP_NAME:
-        query += f"&appName={quote(MONGO_APP_NAME, safe='')}"
+    async def delete_one(self, query):
+        await self.collection.delete_one(query)
+        return True
 
-    # Agar hostda nuqta bo'lmasa va u localhost bo'lmasa, ulanish qiyin bo'lishi mumkin
-    return f"mongodb+srv://{username}:{password}@{host}/?{query}"
+    async def delete_many(self, query):
+        await self.collection.delete_many(query)
+        return True
 
-def is_atlas_url(mongo_url: str) -> bool:
-    return ".mongodb.net" in mongo_url.lower()
+if not MONGO_URL:
+    logging.error("MONGO_URL o'rnatilmagan! Iltimos .env faylini tekshiring.")
+    sys.exit(1)
 
-def create_mongo_client(mongo_url: str) -> AsyncIOMotorClient:
-    options = {
-        "serverSelectionTimeoutMS": MONGO_TIMEOUT_MS,
-        "connectTimeoutMS": MONGO_TIMEOUT_MS,
-        "socketTimeoutMS": MONGO_TIMEOUT_MS,
-        "tls": True,
-    }
-    
-    # SSL sertifikatlarini tekshirish
-    try:
-        ca_path = certifi.where()
-        if os.path.exists(ca_path):
-            options["tlsCAFile"] = ca_path
-    except Exception:
-        pass
-
-    if MONGO_AUTH_SOURCE:
-        options["authSource"] = MONGO_AUTH_SOURCE
-    elif is_atlas_url(mongo_url) and "authsource=" not in mongo_url.lower():
-        options["authSource"] = "admin"
-
-    if MONGO_ALLOW_INVALID_CERTS:
-        logging.warning("MONGO_ALLOW_INVALID_CERTS yoqilgan.")
-        options["tlsAllowInvalidCertificates"] = True
-
-    return AsyncIOMotorClient(mongo_url, **options)
-
-def is_bad_auth_error(error: Exception) -> bool:
-    if not isinstance(error, OperationFailure):
-        return False
-    message = str(error).lower()
-    return getattr(error, "code", None) in {18, 8000} or "bad auth" in message or "authentication failed" in message
-
-def db_error_message(error: Exception) -> str:
-    if is_bad_auth_error(error):
-        return (
-            "Bazaga kirishda login/parol xato. Atlas Database Access bo'limidagi "
-            "database user va passwordni tekshiring. Parolda @, #, /, : kabi belgilar "
-            "bo'lsa, MONGO_USER va MONGO_PASSWORD envlarini alohida kiriting."
-        )
-    
-    err_str = str(error)
-    if "timeout" in err_str.lower():
-        return "Bazaga ulanishda timeout yuz berdi. Network Access (IP whitelist) ni tekshiring."
-    if "cert" in err_str.lower() or "ssl" in err_str.lower():
-        return f"SSL/Sertifikat xatosi: {err_str}. MONGO_ALLOW_INVALID_CERTS=true qilib ko'ring."
-    
-    return f"Bazada xatolik: {err_str}"
-
-MONGO_URL = build_mongo_url()
-
-def setup_db():
-    global cluster, db, collection, last_db_error
-    if MONGO_URL:
-        try:
-            cluster = create_mongo_client(MONGO_URL)
-            db = cluster[MONGO_DB_NAME]
-            collection = db[MONGO_COLLECTION_NAME]
-            logging.info("MongoDB-ga ulanish obyektlari yaratildi.")
-        except Exception as e:
-            last_db_error = str(e)
-            logging.error(f"MongoDB ulanishini sozlashda xato: {e}")
-
-setup_db()
+db = MongoDatabase(MONGO_URL)
 
 bot = Bot(token=TOKEN) if TOKEN else None
 dp = Dispatcher()
 
 # --- HEALTH CHECK ---
 async def handle_health(request):
-    status = "running" if collection is not None else "db_error"
-    return web.Response(text=f"Bot status: {status}")
+    return web.Response(text="Bot is running (JSON DB Mode)!")
 
 async def start_web_server():
     app = web.Application()
@@ -152,43 +80,16 @@ async def start_web_server():
     await site.start()
     logging.info(f"Veb-server {PORT}-portda ishga tushdi.")
 
-async def test_mongodb():
-    global collection, last_db_error
-    if cluster is not None:
-        try:
-            # Ulanishni tekshirish
-            await cluster.admin.command('ping')
-            logging.info("MongoDB-ga muvaffaqiyatli ulanish tasdiqlandi.")
-            last_db_error = None
-            return True
-        except Exception as e:
-            collection = None
-            last_db_error = db_error_message(e)
-            logging.error(f"MongoDB ulanishini tekshirishda xato: {last_db_error}")
-            return False
-    else:
-        last_db_error = "MONGO_URL yoki ulanish sozlamalari mavjud emas."
-    return False
-
 class AdminStates(StatesGroup):
     waiting_for_name = State()
     waiting_for_files = State()
     waiting_for_delete = State()
 
 async def get_main_menu():
-    if collection is None:
-        logging.error("Xatolik: MongoDB-ga ulanmagan!")
-        return ReplyKeyboardRemove()
-    try:
-        logging.info("Bazadan o'yinlar ro'yxati olinmoqda...")
-        cursor = collection.find({})
-        games = await cursor.to_list(length=100)
-        if not games: return ReplyKeyboardRemove()
-        buttons = [[KeyboardButton(text=game['name'])] for game in games]
-        return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
-    except Exception as e:
-        logging.error(f"Bazadan ma'lumot olishda xato: {e}")
-        return ReplyKeyboardRemove()
+    games = await db.find_all()
+    if not games: return ReplyKeyboardRemove()
+    buttons = [[KeyboardButton(text=game['name'])] for game in games]
+    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 # --- START BUYRUQ ---
 @dp.message(CommandStart(), StateFilter("*"))
@@ -197,39 +98,23 @@ async def command_start_handler(message: Message, state: FSMContext):
     await state.clear()
     args = message.text.split()
     
-    # Link orqali kirilganda (masalan /start gamekey)
     if len(args) > 1:
-        if collection is None:
-            err = last_db_error or "Noma'lum ulanish xatosi."
-            await message.answer(f"❌ Xatolik: Baza bilan aloqa yo'q!\n\n<code>{err}</code>", parse_mode="HTML")
-            return
-            
         game_key = args[1].lower()
-        try:
-            game = await collection.find_one({"key": game_key})
-            if game:
-                await message.answer(f"📦 <b>{game['name']}</b> yuborilmoqda...", parse_mode="HTML")
-                for file_id in game['files']:
-                    try:
-                        await bot.send_document(chat_id=message.chat.id, document=file_id)
-                        await asyncio.sleep(0.5)
-                    except Exception as e:
-                        logging.error(f"Fayl yuborishda xato: {e}")
-                return
-            else:
-                await message.answer("❌ O'yin topilmadi yoki link eskirgan.")
-                return
-        except Exception as e:
-            logging.error(f"MongoDB-dan o'yin qidirishda xato: {db_error_message(e)}")
-            await message.answer("❌ Bazaga ulanishda xatolik yuz berdi.")
+        game = await db.find_one({"key": game_key})
+        if game:
+            await message.answer(f"📦 <b>{game['name']}</b> (ID: {game['id']}) yuborilmoqda...", parse_mode="HTML")
+            for file_id in game['files']:
+                try:
+                    await bot.send_document(chat_id=message.chat.id, document=file_id)
+                    await asyncio.sleep(0.5)
+                except Exception as e:
+                    logging.error(f"Fayl yuborishda xato: {e}")
+            return
+        else:
+            await message.answer("❌ O'yin topilmadi yoki link eskirgan.")
             return
     
-    # Oddiy /start bosilganda
     if is_admin(message.from_user.id):
-        if collection is None:
-            err = last_db_error or "Noma'lum ulanish xatosi."
-            await message.answer(f"❌ Xatolik: Baza bilan aloqa yo'q!\n\n<code>{err}</code>", parse_mode="HTML")
-            return
         menu = await get_main_menu()
         await message.answer(f"Xush kelibsiz, Admin {message.from_user.full_name}!", reply_markup=menu)
     else:
@@ -241,25 +126,17 @@ async def add_game_start(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         await message.answer("Siz admin emassiz!")
         return
-    if collection is None:
-        err = last_db_error or "Noma'lum ulanish xatosi."
-        await message.answer(f"❌ Xatolik: Baza bilan aloqa o'rnatilmagan.\n\n<code>{err}</code>", parse_mode="HTML")
-        return
     await state.clear()
     await message.answer("📝 Yangi o'yin nomini kiriting:", reply_markup=ReplyKeyboardRemove())
     await state.set_state(AdminStates.waiting_for_name)
 
 @dp.message(AdminStates.waiting_for_name)
 async def process_name(message: Message, state: FSMContext):
-    if message.text.startswith("/"): return
+    if message.text and message.text.startswith("/"): return
     
-    try:
-        existing_game = await collection.find_one({"name": message.text})
-        if existing_game:
-            await message.answer(f"⚠️ '{message.text}' nomli o'yin allaqachon mavjud. Fayllarni yuborsangiz, eski fayllar yangisiga almashtiriladi.")
-    except Exception as e:
-        logging.error(f"process_name ichida xato: {db_error_message(e)}")
-        await message.answer("⚠️ Baza bilan aloqa sekin yoki xato, lekin davom ettirishingiz mumkin.")
+    existing_game = await db.find_one({"name": message.text})
+    if existing_game:
+        await message.answer(f"⚠️ '{message.text}' nomli o'yin allaqachon mavjud. Fayllarni yuborsangiz, eski fayllar yangisiga almashtiriladi.")
     
     await state.update_data(game_name=message.text, files=[])
     await message.answer(f"📥 '{message.text}' uchun fayllarni yuboring. Tugatgach /done deb yozing.")
@@ -288,24 +165,32 @@ async def save_game(message: Message, state: FSMContext):
     msg = await message.answer("💾 Saqlanmoqda, iltimos kuting...")
     game_key = name.lower().replace(" ", "")
     
-    try:
-        # Nom bir xil bo'lsa eski fayllarni saqlab qolish yoki yangilashni tanlash mumkin.
-        # Hozircha mavjudini yangilaydi (upsert).
-        await collection.update_one(
-            {"name": name},
-            {"$set": {"name": name, "key": game_key, "files": files}},
-            upsert=True
-        )
-        
-        link = f"https://t.me/{BOT_USERNAME}?start={game_key}"
-        await state.clear()
-        menu = await get_main_menu()
-        await msg.edit_text(f"🎉 Saqlandi!\n🔗 Link: <code>{link}</code>", parse_mode="HTML")
-        await message.answer("Asosiy menyu:", reply_markup=menu)
-    except Exception as e:
-        logging.error(f"Saqlashda xato: {db_error_message(e)}")
-        await msg.edit_text(f"Xatolik: {db_error_message(e)}")
+    await db.update_one({"name": name}, {"key": game_key, "files": files}, upsert=True)
+    
+    game = await db.find_one({"name": name})
+    link = f"https://t.me/{BOT_USERNAME}?start={game['key']}"
+    await state.clear()
+    menu = await get_main_menu()
+    await msg.edit_text(f"🎉 Saqlandi! (ID: {game['id']})\n🔗 Link: <code>{link}</code>", parse_mode="HTML")
+    await message.answer("Asosiy menyu:", reply_markup=menu)
+
+# --- RO'YXAT ---
+@dp.message(Command("list"), StateFilter("*"))
+async def list_games(message: Message):
+    if not is_admin(message.from_user.id):
         return
+    
+    games = await db.find_all()
+    if not games:
+        await message.answer("O'yinlar ro'yxati bo'sh.")
+        return
+    
+    text = "🎮 <b>O'yinlar ro'yxati:</b>\n\n"
+    for i, game in enumerate(games, 1):
+        link = f"https://t.me/{BOT_USERNAME}?start={game['key']}"
+        text += f"{i}. <b>{game['name']}</b> (ID: {game['id']})\n🔗 <code>{link}</code>\n\n"
+    
+    await message.answer(text, parse_mode="HTML", disable_web_page_preview=True)
 
 # --- O'CHIRISH ---
 @dp.message(Command("delgame"), StateFilter("*"))
@@ -313,13 +198,8 @@ async def delete_game_start(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         await message.answer("Siz admin emassiz!")
         return
-    if collection is None:
-        err = last_db_error or "Noma'lum ulanish xatosi."
-        await message.answer(f"Xatolik: Baza bilan aloqa yo'q!\n\n<code>{err}</code>", parse_mode="HTML")
-        return
     
-    cursor = collection.find({})
-    games = await cursor.to_list(length=100)
+    games = await db.find_all()
     if not games:
         await message.answer("Baza bo'sh!")
         return
@@ -334,20 +214,14 @@ async def delete_game_start(message: Message, state: FSMContext):
 
 @dp.message(AdminStates.waiting_for_delete)
 async def process_delete(message: Message, state: FSMContext):
-    if collection is None:
-        await state.clear()
-        err = last_db_error or "Noma'lum ulanish xatosi."
-        await message.answer(f"Xatolik: Baza bilan aloqa yo'q!\n\n<code>{err}</code>", parse_mode="HTML")
-        return
-
     if message.text == "❌ Bekor qilish":
         menu = await get_main_menu()
         await state.clear()
         await message.answer("Amal bekor qilindi.", reply_markup=menu)
         return
 
-    res = await collection.delete_one({"name": message.text})
-    if res.deleted_count > 0:
+    deleted = await db.delete_one({"name": message.text})
+    if deleted:
         menu = await get_main_menu()
         await message.answer(f"✅ '{message.text}' o'chirildi!", reply_markup=menu)
     else:
@@ -358,28 +232,19 @@ async def process_delete(message: Message, state: FSMContext):
 @dp.message(Command("clear_db"), StateFilter("*"))
 async def clear_database(message: Message, state: FSMContext):
     if is_admin(message.from_user.id):
-        if collection is None:
-            err = last_db_error or "Noma'lum ulanish xatosi."
-            await message.answer(f"Xatolik: Baza bilan aloqa yo'q!\n\n<code>{err}</code>", parse_mode="HTML")
-            return
         await state.clear()
-        await collection.delete_many({})
+        await db.delete_many({})
         await message.answer("🗑 Baza butunlay tozalandi!", reply_markup=ReplyKeyboardRemove())
 
 # --- ODDIIY MATN (Tugmalar uchun) ---
 @dp.message(F.text, StateFilter(None))
 async def handle_game_buttons(message: Message):
-    # Faqat adminlar tugmalardan foydalana oladi
     if not is_admin(message.from_user.id):
         return
-    if collection is None:
-        err = last_db_error or "Noma'lum ulanish xatosi."
-        await message.answer(f"Xatolik: Baza bilan aloqa yo'q!\n\n<code>{err}</code>", parse_mode="HTML")
-        return
 
-    game = await collection.find_one({"name": message.text})
+    game = await db.find_one({"name": message.text})
     if game:
-        await message.answer(f"🚀 {game['name']} yuborilmoqda...")
+        await message.answer(f"🚀 {game['name']} (ID: {game['id']}) yuborilmoqda...")
         for fid in game['files']:
             try:
                 await bot.send_document(chat_id=message.chat.id, document=fid)
@@ -389,17 +254,10 @@ async def handle_game_buttons(message: Message):
 
 async def main():
     logging.basicConfig(level=logging.INFO, stream=sys.stdout)
-    
-    # Avval veb-serverni ishga tushiramiz (Render uchun)
     await start_web_server()
-    
-    # Keyin o'zgaruvchilarni tekshiramiz
-    if not TOKEN or not MONGO_URL:
-        logging.error("BOT_TOKEN yoki MONGO_URL o'rnatilmagan!")
+    if not TOKEN:
+        logging.error("BOT_TOKEN o'rnatilmagan!")
         return
-
-    await test_mongodb()
-
     try:
         await dp.start_polling(bot)
     except Exception as e:
