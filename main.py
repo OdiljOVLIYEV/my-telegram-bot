@@ -33,9 +33,8 @@ if MONGO_URL:
         cluster = AsyncIOMotorClient(
             MONGO_URL, 
             serverSelectionTimeoutMS=5000,
-            tlsCAFile=certifi.where(),
-            tlsAllowInvalidCertificates=True,
-            tls=True
+            tls=True,
+            tlsAllowInvalidCertificates=True
         )
         db = cluster["tg_bot_db"]
         collection = db["games"]
@@ -53,7 +52,6 @@ async def handle_health(request):
 async def start_web_server():
     app = web.Application()
     app.router.add_get("/", handle_health)
-    app.router.add_head("/", handle_health) # HEAD so'rovlarini ham qabul qilish
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
