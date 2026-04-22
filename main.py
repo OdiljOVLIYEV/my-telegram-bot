@@ -27,6 +27,8 @@ def is_admin(user_id: int) -> bool:
 # MongoDB ulanishi
 db = None
 collection = None
+cluster = None
+
 if MONGO_URL:
     try:
         cluster = AsyncIOMotorClient(
