@@ -24,21 +24,24 @@ PORT = int(os.getenv("PORT", 8080))
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
-# MongoDB ulanishi
-db = None
-collection = None
+import ssl
+
+# ... (ichkarida MONGO_URL qismida)
 if MONGO_URL:
     try:
-        # SSL sertifikatlarini to'g'ri o'qish uchun certifi ishlatamiz
+        # SSL kontekstini qo'lda yaratamiz - bu eng ishonchli usul
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        
         cluster = AsyncIOMotorClient(
             MONGO_URL, 
             serverSelectionTimeoutMS=5000,
-            tls=True,
-            tlsAllowInvalidCertificates=True
+            tlsContext=ssl_context
         )
         db = cluster["tg_bot_db"]
         collection = db["games"]
-        logging.info("MongoDB-ga ulanish sozlandi.")
+        logging.info("MongoDB-ga ulanish sozlandi (SSL Context bilan).")
     except Exception as e:
         logging.error(f"MongoDB ulanishini sozlashda xato: {e}")
 
