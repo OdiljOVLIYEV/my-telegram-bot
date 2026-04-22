@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import sys
-import json
 import os
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command, StateFilter
@@ -10,23 +9,38 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from dotenv import load_dotenv
 from aiohttp import web
+from motor.motor_asyncio import AsyncIOMotorClient
 
 # --- SOZLAMALAR ---
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
-DB_FILE = "database.json"
+# ADMIN_ID ni ro'yxat ko'rinishida olish (masalan: 12345,67890)
+admin_ids_str = os.getenv("ADMIN_ID", "")
+ADMIN_IDS = [int(i.strip()) for i in admin_ids_str.split(",") if i.strip().isdigit()]
+MONGO_URL = os.getenv("MONGO_URL")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "uz_filtr_fayl_bot")
 PORT = int(os.getenv("PORT", 8080))
+
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_IDS
 
 if not TOKEN:
     print("Xatolik: BOT_TOKEN topilmadi!")
     sys.exit(1)
 
+if not MONGO_URL:
+    print("Xatolik: MONGO_URL topilmadi!")
+    sys.exit(1)
+
+# MongoDB ulanishi
+cluster = AsyncIOMotorClient(MONGO_URL, serverSelectionTimeoutMS=5000)
+db = cluster["tg_bot_db"]
+collection = db["games"]
+
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# --- RENDER HEALTH CHECK ---
+# --- HEALTH CHECK ---
 async def handle_health(request):
     return web.Response(text="Bot is running!")
 
@@ -37,51 +51,60 @@ async def start_web_server():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
+    logging.info(f"Veb-server {PORT}-portda ishga tushdi.")
 
 class AdminStates(StatesGroup):
     waiting_for_name = State()
     waiting_for_files = State()
     waiting_for_delete = State()
 
-def load_db():
-    if not os.path.exists(DB_FILE): return {}
-    with open(DB_FILE, "r") as f:
-        try: return json.load(f)
-        except: return {}
-
-def save_db(data):
-    with open(DB_FILE, "w") as f:
-        json.dump(data, f, indent=4)
-
-def get_main_menu():
-    db = load_db()
-    if not db: return ReplyKeyboardRemove()
-    buttons = [[KeyboardButton(text=name)] for name in db.keys()]
-    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+async def get_main_menu():
+    try:
+        logging.info("Bazadan o'yinlar ro'yxati olinmoqda...")
+        cursor = collection.find({})
+        games = await cursor.to_list(length=100)
+        if not games: return ReplyKeyboardRemove()
+        buttons = [[KeyboardButton(text=game['name'])] for game in games]
+        return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+    except Exception as e:
+        logging.error(f"Bazadan ma'lumot olishda xato: {e}")
+        return ReplyKeyboardRemove()
 
 # --- START BUYRUQ ---
 @dp.message(CommandStart(), StateFilter("*"))
 async def command_start_handler(message: Message, state: FSMContext):
+    logging.info(f"User {message.from_user.id} /start bosdi.")
     await state.clear()
     args = message.text.split()
-    db = load_db()
     
+    # Link orqali kirilganda (masalan /start gamekey)
     if len(args) > 1:
         game_key = args[1].lower()
-        for name, files in db.items():
-            if name.lower().replace(" ", "") == game_key:
-                await message.answer(f"📦 <b>{name}</b> yuborilmoqda...", parse_mode="HTML")
-                for file_id in files:
+        game = await collection.find_one({"key": game_key})
+        if game:
+            await message.answer(f"📦 <b>{game['name']}</b> yuborilmoqda...", parse_mode="HTML")
+            for file_id in game['files']:
+                try:
                     await bot.send_document(chat_id=message.chat.id, document=file_id)
                     await asyncio.sleep(0.5)
-                return
+                except Exception as e:
+                    logging.error(f"Fayl yuborishda xato: {e}")
+            return
+        else:
+            await message.answer("❌ O'yin topilmadi yoki link eskirgan.")
+            return
     
-    await message.answer(f"Salom {message.from_user.full_name}!", reply_markup=get_main_menu())
+    # Oddiy /start bosilganda
+    if is_admin(message.from_user.id):
+        menu = await get_main_menu()
+        await message.answer(f"Xush kelibsiz, Admin {message.from_user.full_name}!", reply_markup=menu)
+    else:
+        await message.answer(f"Salom {message.from_user.full_name}! O'yinlarni olish uchun maxsus linkdan foydalaning.", reply_markup=ReplyKeyboardRemove())
 
 # --- QO'SHISH ---
 @dp.message(Command("addgame"), StateFilter("*"))
 async def add_game_start(message: Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID:
+    if not is_admin(message.from_user.id):
         await message.answer("Siz admin emassiz!")
         return
     await state.clear()
@@ -91,6 +114,11 @@ async def add_game_start(message: Message, state: FSMContext):
 @dp.message(AdminStates.waiting_for_name)
 async def process_name(message: Message, state: FSMContext):
     if message.text.startswith("/"): return
+    
+    existing_game = await collection.find_one({"name": message.text})
+    if existing_game:
+        await message.answer(f"⚠️ '{message.text}' nomli o'yin allaqachon mavjud. Fayllarni yuborsangiz, eski fayllar yangisiga almashtiriladi.")
+    
     await state.update_data(game_name=message.text, files=[])
     await message.answer(f"📥 '{message.text}' uchun fayllarni yuboring. Tugatgach /done deb yozing.")
     await state.set_state(AdminStates.waiting_for_files)
@@ -107,33 +135,43 @@ async def collect_files(message: Message, state: FSMContext):
 @dp.message(AdminStates.waiting_for_files, Command("done"))
 async def save_game(message: Message, state: FSMContext):
     data = await state.get_data()
-    if not data.get('game_name') or not data.get('files'):
+    name = data.get('game_name')
+    files = data.get('files')
+    
+    if not name or not files:
         await message.answer("Xatolik: Nom yoki fayllar yetarli emas.")
         await state.clear()
         return
         
-    db = load_db()
-    db[data['game_name']] = data['files']
-    save_db(db)
+    game_key = name.lower().replace(" ", "")
+    # Nom bir xil bo'lsa eski fayllarni saqlab qolish yoki yangilashni tanlash mumkin.
+    # Hozircha mavjudini yangilaydi (upsert).
+    await collection.update_one(
+        {"name": name},
+        {"$set": {"name": name, "key": game_key, "files": files}},
+        upsert=True
+    )
     
-    link = f"https://t.me/{BOT_USERNAME}?start={data['game_name'].lower().replace(' ', '')}"
+    link = f"https://t.me/{BOT_USERNAME}?start={game_key}"
     await state.clear()
-    await message.answer(f"🎉 Saqlandi!\n🔗 Link: <code>{link}</code>", parse_mode="HTML", reply_markup=get_main_menu())
+    menu = await get_main_menu()
+    await message.answer(f"🎉 Saqlandi!\n🔗 Link: <code>{link}</code>", parse_mode="HTML", reply_markup=menu)
 
 # --- O'CHIRISH ---
 @dp.message(Command("delgame"), StateFilter("*"))
 async def delete_game_start(message: Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID:
+    if not is_admin(message.from_user.id):
         await message.answer("Siz admin emassiz!")
         return
     
-    db = load_db()
-    if not db:
+    cursor = collection.find({})
+    games = await cursor.to_list(length=100)
+    if not games:
         await message.answer("Baza bo'sh!")
         return
         
     await state.clear()
-    buttons = [[KeyboardButton(text=name)] for name in db.keys()]
+    buttons = [[KeyboardButton(text=game['name'])] for game in games]
     buttons.append([KeyboardButton(text="❌ Bekor qilish")])
     keyboard = ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
     
@@ -143,16 +181,15 @@ async def delete_game_start(message: Message, state: FSMContext):
 @dp.message(AdminStates.waiting_for_delete)
 async def process_delete(message: Message, state: FSMContext):
     if message.text == "❌ Bekor qilish":
+        menu = await get_main_menu()
         await state.clear()
-        await message.answer("Amal bekor qilindi.", reply_markup=get_main_menu())
+        await message.answer("Amal bekor qilindi.", reply_markup=menu)
         return
 
-    db = load_db()
-    game_name = message.text
-    if game_name in db:
-        del db[game_name]
-        save_db(db)
-        await message.answer(f"✅ '{game_name}' o'chirildi!", reply_markup=get_main_menu())
+    res = await collection.delete_one({"name": message.text})
+    if res.deleted_count > 0:
+        menu = await get_main_menu()
+        await message.answer(f"✅ '{message.text}' o'chirildi!", reply_markup=menu)
     else:
         await message.answer("Bunday o'yin topilmadi.")
     
@@ -160,18 +197,22 @@ async def process_delete(message: Message, state: FSMContext):
 
 @dp.message(Command("clear_db"), StateFilter("*"))
 async def clear_database(message: Message, state: FSMContext):
-    if message.from_user.id == ADMIN_ID:
+    if is_admin(message.from_user.id):
         await state.clear()
-        save_db({})
+        await collection.delete_many({})
         await message.answer("🗑 Baza butunlay tozalandi!", reply_markup=ReplyKeyboardRemove())
 
 # --- ODDIIY MATN (Tugmalar uchun) ---
 @dp.message(F.text, StateFilter(None))
 async def handle_game_buttons(message: Message):
-    db = load_db()
-    if message.text in db:
-        await message.answer(f"🚀 {message.text} yuborilmoqda...")
-        for fid in db[message.text]:
+    # Faqat adminlar tugmalardan foydalana oladi
+    if not is_admin(message.from_user.id):
+        return
+
+    game = await collection.find_one({"name": message.text})
+    if game:
+        await message.answer(f"🚀 {game['name']} yuborilmoqda...")
+        for fid in game['files']:
             try:
                 await bot.send_document(chat_id=message.chat.id, document=fid)
                 await asyncio.sleep(0.5)
