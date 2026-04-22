@@ -2,6 +2,7 @@ import asyncio
 import logging
 import sys
 import os
+import certifi # SSL xatolarini tuzatish uchun
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardRemove
@@ -23,13 +24,22 @@ PORT = int(os.getenv("PORT", 8080))
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
-# MongoDB ulanishi (faqat URL bo'lsa ulanamiz)
+# MongoDB ulanishi
 db = None
 collection = None
 if MONGO_URL:
-    cluster = AsyncIOMotorClient(MONGO_URL, serverSelectionTimeoutMS=5000)
-    db = cluster["tg_bot_db"]
-    collection = db["games"]
+    try:
+        # SSL sertifikatlarini to'g'ri o'qish uchun certifi ishlatamiz
+        cluster = AsyncIOMotorClient(
+            MONGO_URL, 
+            serverSelectionTimeoutMS=5000,
+            tlsCAFile=certifi.where()
+        )
+        db = cluster["tg_bot_db"]
+        collection = db["games"]
+        logging.info("MongoDB-ga ulanish sozlandi.")
+    except Exception as e:
+        logging.error(f"MongoDB ulanishini sozlashda xato: {e}")
 
 bot = Bot(token=TOKEN) if TOKEN else None
 dp = Dispatcher()
@@ -41,11 +51,25 @@ async def handle_health(request):
 async def start_web_server():
     app = web.Application()
     app.router.add_get("/", handle_health)
+    app.router.add_head("/", handle_health) # HEAD so'rovlarini ham qabul qilish
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
     logging.info(f"Veb-server {PORT}-portda ishga tushdi.")
+
+async def test_mongodb():
+    global collection
+    if collection is not None:
+        try:
+            # Ulanishni tekshirish uchun oddiy amal
+            await cluster.admin.command('ping')
+            logging.info("MongoDB-ga muvaffaqiyatli ulanish tasdiqlandi.")
+            return True
+        except Exception as e:
+            logging.error(f"MongoDB ulanishini tekshirishda xato: {e}")
+            return False
+    return False
 
 class AdminStates(StatesGroup):
     waiting_for_name = State()
