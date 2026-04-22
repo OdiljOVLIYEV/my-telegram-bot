@@ -140,7 +140,7 @@ dp = Dispatcher()
 
 # --- HEALTH CHECK ---
 async def handle_health(request):
-    status = "running" if collection else "db_error"
+    status = "running" if collection is not None else "db_error"
     return web.Response(text=f"Bot status: {status}")
 
 async def start_web_server():
@@ -226,6 +226,10 @@ async def command_start_handler(message: Message, state: FSMContext):
     
     # Oddiy /start bosilganda
     if is_admin(message.from_user.id):
+        if collection is None:
+            err = last_db_error or "Noma'lum ulanish xatosi."
+            await message.answer(f"❌ Xatolik: Baza bilan aloqa yo'q!\n\n<code>{err}</code>", parse_mode="HTML")
+            return
         menu = await get_main_menu()
         await message.answer(f"Xush kelibsiz, Admin {message.from_user.full_name}!", reply_markup=menu)
     else:
