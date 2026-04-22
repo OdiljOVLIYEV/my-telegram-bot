@@ -3,6 +3,7 @@ import logging
 import sys
 import os
 import certifi
+from urllib.parse import quote
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardRemove
@@ -11,18 +12,24 @@ from aiogram.fsm.state import State, StatesGroup
 from dotenv import load_dotenv
 from aiohttp import web
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo.errors import OperationFailure
 
 # --- SOZLAMALAR ---
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 admin_ids_str = os.getenv("ADMIN_ID", "")
 ADMIN_IDS = [int(i.strip()) for i in admin_ids_str.split(",") if i.strip().isdigit()]
-MONGO_URL = os.getenv("MONGO_URL")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "uz_filtr_fayl_bot")
 PORT = int(os.getenv("PORT", 8080))
+MONGO_RAW_URL = os.getenv("MONGO_URL")
+MONGO_HOST = os.getenv("MONGO_HOST")
+MONGO_USER = os.getenv("MONGO_USER")
+MONGO_PASSWORD = os.getenv("MONGO_PASSWORD")
+MONGO_APP_NAME = os.getenv("MONGO_APP_NAME")
 MONGO_TIMEOUT_MS = int(os.getenv("MONGO_TIMEOUT_MS", 20000))
 MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "tg_bot_db")
 MONGO_COLLECTION_NAME = os.getenv("MONGO_COLLECTION_NAME", "games")
+MONGO_AUTH_SOURCE = os.getenv("MONGO_AUTH_SOURCE")
 MONGO_ALLOW_INVALID_CERTS = os.getenv("MONGO_ALLOW_INVALID_CERTS", "").lower() in {"1", "true", "yes"}
 
 def is_admin(user_id: int) -> bool:
@@ -33,6 +40,30 @@ db = None
 collection = None
 cluster = None
 
+def build_mongo_url() -> str | None:
+    if MONGO_RAW_URL:
+        return MONGO_RAW_URL
+
+    if not (MONGO_HOST and MONGO_USER and MONGO_PASSWORD):
+        return None
+
+    host = MONGO_HOST.strip()
+    for prefix in ("mongodb+srv://", "mongodb://"):
+        if host.startswith(prefix):
+            host = host[len(prefix):]
+    host = host.split("/", 1)[0]
+
+    username = quote(MONGO_USER, safe="")
+    password = quote(MONGO_PASSWORD, safe="")
+    query = "retryWrites=true&w=majority"
+    if MONGO_APP_NAME:
+        query += f"&appName={quote(MONGO_APP_NAME, safe='')}"
+
+    return f"mongodb+srv://{username}:{password}@{host}/?{query}"
+
+def is_atlas_url(mongo_url: str) -> bool:
+    return ".mongodb.net" in mongo_url.lower()
+
 def create_mongo_client(mongo_url: str) -> AsyncIOMotorClient:
     options = {
         "serverSelectionTimeoutMS": MONGO_TIMEOUT_MS,
@@ -42,11 +73,33 @@ def create_mongo_client(mongo_url: str) -> AsyncIOMotorClient:
         "tlsCAFile": certifi.where(),
     }
 
+    if MONGO_AUTH_SOURCE:
+        options["authSource"] = MONGO_AUTH_SOURCE
+    elif is_atlas_url(mongo_url) and "authsource=" not in mongo_url.lower():
+        options["authSource"] = "admin"
+
     if MONGO_ALLOW_INVALID_CERTS:
         logging.warning("MONGO_ALLOW_INVALID_CERTS yoqilgan. Buni faqat vaqtinchalik tekshiruv uchun ishlating.")
         options["tlsAllowInvalidCertificates"] = True
 
     return AsyncIOMotorClient(mongo_url, **options)
+
+def is_bad_auth_error(error: Exception) -> bool:
+    if not isinstance(error, OperationFailure):
+        return False
+    message = str(error).lower()
+    return getattr(error, "code", None) in {18, 8000} or "bad auth" in message or "authentication failed" in message
+
+def db_error_message(error: Exception) -> str:
+    if is_bad_auth_error(error):
+        return (
+            "Bazaga kirishda login/parol xato. Atlas Database Access bo'limidagi "
+            "database user va passwordni tekshiring. Parolda @, #, /, : kabi belgilar "
+            "bo'lsa, MONGO_USER, MONGO_PASSWORD va MONGO_HOST envlarini alohida kiriting."
+        )
+    return f"Bazada xatolik yuz berdi: {error}"
+
+MONGO_URL = build_mongo_url()
 
 if MONGO_URL:
     try:
@@ -82,7 +135,8 @@ async def test_mongodb():
             logging.info("MongoDB-ga muvaffaqiyatli ulanish tasdiqlandi.")
             return True
         except Exception as e:
-            logging.error(f"MongoDB ulanishini tekshirishda xato: {e}")
+            collection = None
+            logging.error(f"MongoDB ulanishini tekshirishda xato: {db_error_message(e)}")
             logging.error("Agar Atlas ishlatayotgan bo'lsangiz, Network Access bo'limida server IP manziliga ruxsat berilganini va MONGO_URL mongodb+srv:// formatida ekanini tekshiring.")
             return False
     return False
@@ -136,7 +190,7 @@ async def command_start_handler(message: Message, state: FSMContext):
                 await message.answer("❌ O'yin topilmadi yoki link eskirgan.")
                 return
         except Exception as e:
-            logging.error(f"MongoDB-dan o'yin qidirishda xato: {e}")
+            logging.error(f"MongoDB-dan o'yin qidirishda xato: {db_error_message(e)}")
             await message.answer("❌ Bazaga ulanishda xatolik yuz berdi.")
             return
     
@@ -169,7 +223,7 @@ async def process_name(message: Message, state: FSMContext):
         if existing_game:
             await message.answer(f"⚠️ '{message.text}' nomli o'yin allaqachon mavjud. Fayllarni yuborsangiz, eski fayllar yangisiga almashtiriladi.")
     except Exception as e:
-        logging.error(f"process_name ichida xato: {e}")
+        logging.error(f"process_name ichida xato: {db_error_message(e)}")
         await message.answer("⚠️ Baza bilan aloqa sekin yoki xato, lekin davom ettirishingiz mumkin.")
     
     await state.update_data(game_name=message.text, files=[])
@@ -214,14 +268,18 @@ async def save_game(message: Message, state: FSMContext):
         await msg.edit_text(f"🎉 Saqlandi!\n🔗 Link: <code>{link}</code>", parse_mode="HTML")
         await message.answer("Asosiy menyu:", reply_markup=menu)
     except Exception as e:
-        logging.error(f"Saqlashda xato: {e}")
-        await msg.edit_text(f"❌ Saqlashda xatolik yuz berdi: {e}")
+        logging.error(f"Saqlashda xato: {db_error_message(e)}")
+        await msg.edit_text(f"Xatolik: {db_error_message(e)}")
+        return
 
 # --- O'CHIRISH ---
 @dp.message(Command("delgame"), StateFilter("*"))
 async def delete_game_start(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         await message.answer("Siz admin emassiz!")
+        return
+    if collection is None:
+        await message.answer("Xatolik: Baza bilan aloqa o'rnatilmagan. MONGO_URL yoki Atlas login/parolni tekshiring.")
         return
     
     cursor = collection.find({})
@@ -240,6 +298,11 @@ async def delete_game_start(message: Message, state: FSMContext):
 
 @dp.message(AdminStates.waiting_for_delete)
 async def process_delete(message: Message, state: FSMContext):
+    if collection is None:
+        await state.clear()
+        await message.answer("Xatolik: Baza bilan aloqa o'rnatilmagan. MONGO_URL yoki Atlas login/parolni tekshiring.")
+        return
+
     if message.text == "❌ Bekor qilish":
         menu = await get_main_menu()
         await state.clear()
@@ -258,6 +321,9 @@ async def process_delete(message: Message, state: FSMContext):
 @dp.message(Command("clear_db"), StateFilter("*"))
 async def clear_database(message: Message, state: FSMContext):
     if is_admin(message.from_user.id):
+        if collection is None:
+            await message.answer("Xatolik: Baza bilan aloqa o'rnatilmagan. MONGO_URL yoki Atlas login/parolni tekshiring.")
+            return
         await state.clear()
         await collection.delete_many({})
         await message.answer("🗑 Baza butunlay tozalandi!", reply_markup=ReplyKeyboardRemove())
@@ -267,6 +333,9 @@ async def clear_database(message: Message, state: FSMContext):
 async def handle_game_buttons(message: Message):
     # Faqat adminlar tugmalardan foydalana oladi
     if not is_admin(message.from_user.id):
+        return
+    if collection is None:
+        await message.answer("Xatolik: Baza bilan aloqa o'rnatilmagan. MONGO_URL yoki Atlas login/parolni tekshiring.")
         return
 
     game = await collection.find_one({"name": message.text})
