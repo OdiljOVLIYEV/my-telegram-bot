@@ -2,7 +2,7 @@ import asyncio
 import logging
 import sys
 import os
-import certifi # SSL xatolarini tuzatish uchun
+import certifi
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardRemove
@@ -20,6 +20,10 @@ ADMIN_IDS = [int(i.strip()) for i in admin_ids_str.split(",") if i.strip().isdig
 MONGO_URL = os.getenv("MONGO_URL")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "uz_filtr_fayl_bot")
 PORT = int(os.getenv("PORT", 8080))
+MONGO_TIMEOUT_MS = int(os.getenv("MONGO_TIMEOUT_MS", 20000))
+MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "tg_bot_db")
+MONGO_COLLECTION_NAME = os.getenv("MONGO_COLLECTION_NAME", "games")
+MONGO_ALLOW_INVALID_CERTS = os.getenv("MONGO_ALLOW_INVALID_CERTS", "").lower() in {"1", "true", "yes"}
 
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
@@ -29,16 +33,26 @@ db = None
 collection = None
 cluster = None
 
+def create_mongo_client(mongo_url: str) -> AsyncIOMotorClient:
+    options = {
+        "serverSelectionTimeoutMS": MONGO_TIMEOUT_MS,
+        "connectTimeoutMS": MONGO_TIMEOUT_MS,
+        "socketTimeoutMS": MONGO_TIMEOUT_MS,
+        "tls": True,
+        "tlsCAFile": certifi.where(),
+    }
+
+    if MONGO_ALLOW_INVALID_CERTS:
+        logging.warning("MONGO_ALLOW_INVALID_CERTS yoqilgan. Buni faqat vaqtinchalik tekshiruv uchun ishlating.")
+        options["tlsAllowInvalidCertificates"] = True
+
+    return AsyncIOMotorClient(mongo_url, **options)
+
 if MONGO_URL:
     try:
-        cluster = AsyncIOMotorClient(
-            MONGO_URL, 
-            serverSelectionTimeoutMS=5000,
-            tls=True,
-            tlsAllowInvalidCertificates=True
-        )
-        db = cluster["tg_bot_db"]
-        collection = db["games"]
+        cluster = create_mongo_client(MONGO_URL)
+        db = cluster[MONGO_DB_NAME]
+        collection = db[MONGO_COLLECTION_NAME]
         logging.info("MongoDB-ga ulanish sozlandi.")
     except Exception as e:
         logging.error(f"MongoDB ulanishini sozlashda xato: {e}")
@@ -69,6 +83,7 @@ async def test_mongodb():
             return True
         except Exception as e:
             logging.error(f"MongoDB ulanishini tekshirishda xato: {e}")
+            logging.error("Agar Atlas ishlatayotgan bo'lsangiz, Network Access bo'limida server IP manziliga ruxsat berilganini va MONGO_URL mongodb+srv:// formatida ekanini tekshiring.")
             return False
     return False
 
@@ -274,6 +289,8 @@ async def main():
     if not TOKEN or not MONGO_URL:
         logging.error("BOT_TOKEN yoki MONGO_URL o'rnatilmagan!")
         return
+
+    await test_mongodb()
 
     try:
         await dp.start_polling(bot)
