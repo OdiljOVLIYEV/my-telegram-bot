@@ -15,7 +15,7 @@ from aiohttp import web
 # --- SOZLAMALAR ---
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
-MONGO_URL = os.getenv("MONGO_URL") # MongoDB Atlas ulanish kodi
+MONGO_URL = os.getenv("MONGO_URL", "").strip() # Bo'sh joylarni tozalash
 admin_ids_str = os.getenv("ADMIN_ID", "")
 ADMIN_IDS = [int(i.strip()) for i in admin_ids_str.split(",") if i.strip().isdigit()]
 BOT_USERNAME = os.getenv("BOT_USERNAME", "uz_filtr_fayl_bot")
@@ -27,9 +27,13 @@ def is_admin(user_id: int) -> bool:
 # MongoDB Baza boshqaruvi
 class MongoDatabase:
     def __init__(self, url):
-        self.client = AsyncIOMotorClient(url)
-        self.db = self.client['tg_bot_db']
-        self.collection = self.db['games']
+        try:
+            self.client = AsyncIOMotorClient(url)
+            self.db = self.client['tg_bot_db']
+            self.collection = self.db['games']
+        except Exception as e:
+            logging.error(f"MongoDB Client yaratishda xato: {e}")
+            raise e
 
     async def find_one(self, query):
         return await self.collection.find_one(query)
