@@ -95,8 +95,22 @@ class AdminStates(StatesGroup):
 
 async def get_main_menu():
     games = await db.find_all()
-    if not games: return ReplyKeyboardRemove()
-    buttons = [[KeyboardButton(text=game['name'])] for game in games]
+    buttons = []
+    if games:
+        # Har bir qatorda 2 tadan o'yin nomi
+        row = []
+        for i, game in enumerate(games):
+            row.append(KeyboardButton(text=game['name']))
+            if (i + 1) % 2 == 0:
+                buttons.append(row)
+                row = []
+        if row: buttons.append(row)
+    
+    buttons.append([KeyboardButton(text="🔗 Barcha linklar")])
+    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+
+async def get_user_menu():
+    buttons = [[KeyboardButton(text="🔗 Barcha linklar")]]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 # --- START BUYRUQ ---
@@ -126,7 +140,8 @@ async def command_start_handler(message: Message, state: FSMContext):
         menu = await get_main_menu()
         await message.answer(f"Xush kelibsiz, Admin {message.from_user.full_name}!", reply_markup=menu)
     else:
-        await message.answer(f"Salom {message.from_user.full_name}! O'yinlarni olish uchun maxsus linkdan foydalaning.", reply_markup=ReplyKeyboardRemove())
+        menu = await get_user_menu()
+        await message.answer(f"Salom {message.from_user.full_name}! O'yinlarni olish uchun quyidagi tugmani bosing yoki maxsus linkdan foydalaning.", reply_markup=menu)
 
 # --- QO'SHISH ---
 @dp.message(Command("addgame"), StateFilter("*"))
@@ -183,20 +198,18 @@ async def save_game(message: Message, state: FSMContext):
     await message.answer("Asosiy menyu:", reply_markup=menu)
 
 # --- RO'YXAT ---
-@dp.message(Command("list"), StateFilter("*"))
+@dp.message(Command("list", "links"), StateFilter("*"))
+@dp.message(F.text == "🔗 Barcha linklar")
 async def list_games(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-    
     games = await db.find_all()
     if not games:
-        await message.answer("O'yinlar ro'yxati bo'sh.")
+        await message.answer("Hozircha o'yinlar ro'yxati bo'sh.")
         return
     
-    text = "🎮 <b>O'yinlar ro'yxati:</b>\n\n"
+    text = "🎮 <b>Tayyor linklar ro'yxati:</b>\n\n"
     for i, game in enumerate(games, 1):
         link = f"https://t.me/{BOT_USERNAME}?start={game['key']}"
-        text += f"{i}. <b>{game['name']}</b> (ID: {game['id']})\n🔗 <code>{link}</code>\n\n"
+        text += f"{i}. <b>{game['name']}</b>\n🔗 <code>{link}</code>\n\n"
     
     await message.answer(text, parse_mode="HTML", disable_web_page_preview=True)
 
