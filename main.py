@@ -254,6 +254,18 @@ async def handle_game_buttons(message: Message):
 
 async def main():
     logging.basicConfig(level=logging.INFO, stream=sys.stdout)
+    
+    # MongoDB ulanishini tekshirish
+    try:
+        logging.info("MongoDB-ga ulanish tekshirilmoqda...")
+        await db.client.admin.command('ping')
+        logging.info("✅ MongoDB ulanishi muvaffaqiyatli!")
+    except Exception as e:
+        logging.error(f"❌ MongoDB-ga ulanishda xato: {e}")
+        logging.error("Iltimos, MONGO_URL, login va parolni tekshiring.")
+        # To'xtatib qo'yamiz, chunki bazasiz bot ishlamaydi
+        return
+
     await start_web_server()
     if not TOKEN:
         logging.error("BOT_TOKEN o'rnatilmagan!")
