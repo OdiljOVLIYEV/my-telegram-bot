@@ -180,19 +180,26 @@ async def save_game(message: Message, state: FSMContext):
         await state.clear()
         return
         
+    msg = await message.answer("💾 Saqlanmoqda, iltimos kuting...")
     game_key = name.lower().replace(" ", "")
-    # Nom bir xil bo'lsa eski fayllarni saqlab qolish yoki yangilashni tanlash mumkin.
-    # Hozircha mavjudini yangilaydi (upsert).
-    await collection.update_one(
-        {"name": name},
-        {"$set": {"name": name, "key": game_key, "files": files}},
-        upsert=True
-    )
     
-    link = f"https://t.me/{BOT_USERNAME}?start={game_key}"
-    await state.clear()
-    menu = await get_main_menu()
-    await message.answer(f"🎉 Saqlandi!\n🔗 Link: <code>{link}</code>", parse_mode="HTML", reply_markup=menu)
+    try:
+        # Nom bir xil bo'lsa eski fayllarni saqlab qolish yoki yangilashni tanlash mumkin.
+        # Hozircha mavjudini yangilaydi (upsert).
+        await collection.update_one(
+            {"name": name},
+            {"$set": {"name": name, "key": game_key, "files": files}},
+            upsert=True
+        )
+        
+        link = f"https://t.me/{BOT_USERNAME}?start={game_key}"
+        await state.clear()
+        menu = await get_main_menu()
+        await msg.edit_text(f"🎉 Saqlandi!\n🔗 Link: <code>{link}</code>", parse_mode="HTML")
+        await message.answer("Asosiy menyu:", reply_markup=menu)
+    except Exception as e:
+        logging.error(f"Saqlashda xato: {e}")
+        await msg.edit_text(f"❌ Saqlashda xatolik yuz berdi: {e}")
 
 # --- O'CHIRISH ---
 @dp.message(Command("delgame"), StateFilter("*"))
