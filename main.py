@@ -14,7 +14,6 @@ from motor.motor_asyncio import AsyncIOMotorClient
 # --- SOZLAMALAR ---
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
-# ADMIN_ID ni ro'yxat ko'rinishida olish (masalan: 12345,67890)
 admin_ids_str = os.getenv("ADMIN_ID", "")
 ADMIN_IDS = [int(i.strip()) for i in admin_ids_str.split(",") if i.strip().isdigit()]
 MONGO_URL = os.getenv("MONGO_URL")
@@ -24,20 +23,15 @@ PORT = int(os.getenv("PORT", 8080))
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
-if not TOKEN:
-    print("Xatolik: BOT_TOKEN topilmadi!")
-    sys.exit(1)
+# MongoDB ulanishi (faqat URL bo'lsa ulanamiz)
+db = None
+collection = None
+if MONGO_URL:
+    cluster = AsyncIOMotorClient(MONGO_URL, serverSelectionTimeoutMS=5000)
+    db = cluster["tg_bot_db"]
+    collection = db["games"]
 
-if not MONGO_URL:
-    print("Xatolik: MONGO_URL topilmadi!")
-    sys.exit(1)
-
-# MongoDB ulanishi
-cluster = AsyncIOMotorClient(MONGO_URL, serverSelectionTimeoutMS=5000)
-db = cluster["tg_bot_db"]
-collection = db["games"]
-
-bot = Bot(token=TOKEN)
+bot = Bot(token=TOKEN) if TOKEN else None
 dp = Dispatcher()
 
 # --- HEALTH CHECK ---
@@ -221,10 +215,19 @@ async def handle_game_buttons(message: Message):
 
 async def main():
     logging.basicConfig(level=logging.INFO, stream=sys.stdout)
-    await asyncio.gather(
-        start_web_server(),
-        dp.start_polling(bot)
-    )
+    
+    # Avval veb-serverni ishga tushiramiz (Render uchun)
+    await start_web_server()
+    
+    # Keyin o'zgaruvchilarni tekshiramiz
+    if not TOKEN or not MONGO_URL:
+        logging.error("BOT_TOKEN yoki MONGO_URL o'rnatilmagan!")
+        return
+
+    try:
+        await dp.start_polling(bot)
+    except Exception as e:
+        logging.error(f"Pollingda xato: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main())
