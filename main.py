@@ -213,6 +213,29 @@ async def list_games(message: Message):
     
     await message.answer(text, parse_mode="HTML", disable_web_page_preview=True)
 
+# --- HELP BUYRUQ ---
+@dp.message(Command("help"), StateFilter("*"))
+async def command_help_handler(message: Message):
+    if is_admin(message.from_user.id):
+        help_text = (
+            "🛠 <b>Admin yordami:</b>\n\n"
+            "/start - Botni ishga tushirish\n"
+            "/addgame - Yangi o'yin qo'shish\n"
+            "/list - Barcha o'yinlar ro'yxatini ko'rish\n"
+            "/delgame - O'yinni o'chirish\n"
+            "/clear_db - Bazani butunlay tozalash\n"
+            "/help - Ushbu yordam xabarini ko'rish"
+        )
+    else:
+        help_text = (
+            "ℹ️ <b>Yordam:</b>\n\n"
+            "/start - Botni ishga tushirish\n"
+            "/list - Barcha o'yinlar ro'yxatini ko'rish\n"
+            "/help - Ushbu yordam xabarini ko'rish"
+        )
+    
+    await message.answer(help_text, parse_mode="HTML")
+
 # --- O'CHIRISH ---
 @dp.message(Command("delgame"), StateFilter("*"))
 async def delete_game_start(message: Message, state: FSMContext):
