@@ -110,8 +110,8 @@ async def get_main_menu():
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 async def get_user_menu():
-    buttons = [[KeyboardButton(text="🔗 Barcha linklar")]]
-    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+    # Oddiy foydalanuvchilar uchun maxsus tugmalar kerak bo'lmasa, bo'sh qaytaramiz
+    return ReplyKeyboardRemove()
 
 # --- START BUYRUQ ---
 @dp.message(CommandStart(), StateFilter("*"))
@@ -201,6 +201,10 @@ async def save_game(message: Message, state: FSMContext):
 @dp.message(Command("list", "links"), StateFilter("*"))
 @dp.message(F.text == "🔗 Barcha linklar")
 async def list_games(message: Message):
+    if not is_admin(message.from_user.id):
+        await message.answer("Siz admin emassiz!")
+        return
+
     games = await db.find_all()
     if not games:
         await message.answer("Hozircha o'yinlar ro'yxati bo'sh.")
@@ -230,7 +234,6 @@ async def command_help_handler(message: Message):
         help_text = (
             "ℹ️ <b>Yordam:</b>\n\n"
             "/start - Botni ishga tushirish\n"
-            "/list - Barcha o'yinlar ro'yxatini ko'rish\n"
             "/help - Ushbu yordam xabarini ko'rish"
         )
     
@@ -284,6 +287,7 @@ async def clear_database(message: Message, state: FSMContext):
 @dp.message(F.text, StateFilter(None))
 async def handle_game_buttons(message: Message):
     if not is_admin(message.from_user.id):
+        # Admin bo'lmagan foydalanuvchilar matn yozsa javob bermaymiz
         return
 
     game = await db.find_one({"name": message.text})
