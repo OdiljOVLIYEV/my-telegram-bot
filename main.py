@@ -10,6 +10,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
+import aiohttp
 from aiohttp import web
 
 # --- SOZLAMALAR ---
@@ -20,6 +21,8 @@ admin_ids_str = os.getenv("ADMIN_ID", "")
 ADMIN_IDS = [int(i.strip()) for i in admin_ids_str.split(",") if i.strip().isdigit()]
 BOT_USERNAME = os.getenv("BOT_USERNAME", "uz_filtr_fayl_bot")
 PORT = int(os.getenv("PORT", 8080))
+UZGAMECORE_API_URL = os.getenv("UZGAMECORE_API_URL", "https://uzgamecore.uz").rstrip("/")
+DOWNLOAD_TICKET_BOT_SECRET = os.getenv("DOWNLOAD_TICKET_BOT_SECRET", "").strip()
 
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
@@ -113,6 +116,33 @@ async def get_user_menu():
     # Oddiy foydalanuvchilar uchun maxsus tugmalar kerak bo'lmasa, bo'sh qaytaramiz
     return ReplyKeyboardRemove()
 
+async def redeem_download_ticket(ticket: str):
+    if not DOWNLOAD_TICKET_BOT_SECRET:
+        logging.error("DOWNLOAD_TICKET_BOT_SECRET o'rnatilmagan.")
+        return None
+
+    timeout = aiohttp.ClientTimeout(total=10)
+    headers = {
+        "Authorization": f"Bearer {DOWNLOAD_TICKET_BOT_SECRET}",
+        "Content-Type": "application/json"
+    }
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                f"{UZGAMECORE_API_URL}/api/download-tickets/redeem",
+                headers=headers,
+                json={"ticket": ticket}
+            ) as response:
+                if response.status != 200:
+                    logging.warning("Download ticket rad etildi: status=%s", response.status)
+                    return None
+                payload = await response.json()
+                game_key = payload.get("gameKey")
+                return game_key.strip().lower() if isinstance(game_key, str) else None
+    except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+        logging.error("UZGameCore ticket API bilan aloqa xatosi: %s", error)
+        return None
+
 # --- START BUYRUQ ---
 @dp.message(CommandStart(), StateFilter("*"))
 async def command_start_handler(message: Message, state: FSMContext):
@@ -121,7 +151,23 @@ async def command_start_handler(message: Message, state: FSMContext):
     args = message.text.split()
     
     if len(args) > 1:
-        game_key = args[1].lower()
+        start_payload = args[1].strip()
+        game_key = None
+
+        # Adminlar bot ichida eski kalit bilan diagnostika qila oladi.
+        if is_admin(message.from_user.id):
+            admin_game = await db.find_one({"key": start_payload.lower()})
+            if admin_game:
+                game_key = start_payload.lower()
+
+        if not game_key:
+            game_key = await redeem_download_ticket(start_payload)
+        if not game_key:
+            await message.answer(
+                "❌ Link eskirgan yoki avval ishlatilgan. Saytdan qayta yuklashni bosing."
+            )
+            return
+
         game = await db.find_one({"key": game_key})
         if game:
             await message.answer(f"📦 <b>{game['name']}</b> (ID: {game['id']}) yuborilmoqda...", parse_mode="HTML")
@@ -317,6 +363,9 @@ async def main():
     await start_web_server()
     if not TOKEN:
         logging.error("BOT_TOKEN o'rnatilmagan!")
+        return
+    if not DOWNLOAD_TICKET_BOT_SECRET:
+        logging.error("DOWNLOAD_TICKET_BOT_SECRET o'rnatilmagan!")
         return
     
     try:
