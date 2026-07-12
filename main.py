@@ -158,7 +158,7 @@ async def command_start_handler(message: Message, state: FSMContext):
         start_payload = args[1].strip()
         if not is_download_ticket_payload(start_payload):
             await message.answer(
-                "Bu raw link yopilgan. Hamma, jumladan admin ham, faylni saytdagi yangi tokenli yuklash tugmasi orqali olishi kerak."
+                "Bu link ishlamaydi."
             )
             return
 
