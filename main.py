@@ -3,6 +3,7 @@ import logging
 import sys
 import os
 import json
+import re
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardRemove
@@ -143,6 +144,9 @@ async def redeem_download_ticket(ticket: str):
         logging.error("UZGameCore ticket API bilan aloqa xatosi: %s", error)
         return None
 
+def is_download_ticket_payload(payload: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9_-]{32}", (payload or "").strip()))
+
 # --- START BUYRUQ ---
 @dp.message(CommandStart(), StateFilter("*"))
 async def command_start_handler(message: Message, state: FSMContext):
@@ -161,16 +165,23 @@ async def command_start_handler(message: Message, state: FSMContext):
                 game_key = start_payload.lower()
 
         if not game_key:
+            if not is_download_ticket_payload(start_payload):
+                await message.answer(
+                    "Bu eski/to'g'ridan-to'g'ri link oddiy foydalanuvchi uchun yopilgan. Faylni saytdagi yuklash tugmasi orqali qayta oling."
+                )
+                return
+
             game_key = await redeem_download_ticket(start_payload)
+
         if not game_key:
             await message.answer(
-                "❌ Link eskirgan yoki avval ishlatilgan. Saytdan qayta yuklashni bosing."
+                "Link eskirgan yoki avval ishlatilgan. Saytdan qayta yuklashni bosing."
             )
             return
 
         game = await db.find_one({"key": game_key})
         if game:
-            await message.answer(f"📦 <b>{game['name']}</b> (ID: {game['id']}) yuborilmoqda...", parse_mode="HTML")
+            await message.answer(f"<b>{game['name']}</b> (ID: {game['id']}) yuborilmoqda...", parse_mode="HTML")
             for file_id in game['files']:
                 try:
                     await bot.send_document(chat_id=message.chat.id, document=file_id)
@@ -179,7 +190,7 @@ async def command_start_handler(message: Message, state: FSMContext):
                     logging.error(f"Fayl yuborishda xato: {e}")
             return
         else:
-            await message.answer("❌ O'yin topilmadi yoki link eskirgan.")
+            await message.answer("O'yin topilmadi yoki link eskirgan.")
             return
     
     if is_admin(message.from_user.id):
