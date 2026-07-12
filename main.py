@@ -156,22 +156,13 @@ async def command_start_handler(message: Message, state: FSMContext):
     
     if len(args) > 1:
         start_payload = args[1].strip()
-        game_key = None
+        if not is_download_ticket_payload(start_payload):
+            await message.answer(
+                "Bu raw link yopilgan. Hamma, jumladan admin ham, faylni saytdagi yangi tokenli yuklash tugmasi orqali olishi kerak."
+            )
+            return
 
-        # Adminlar bot ichida eski kalit bilan diagnostika qila oladi.
-        if is_admin(message.from_user.id):
-            admin_game = await db.find_one({"key": start_payload.lower()})
-            if admin_game:
-                game_key = start_payload.lower()
-
-        if not game_key:
-            if not is_download_ticket_payload(start_payload):
-                await message.answer(
-                    "Bu eski/to'g'ridan-to'g'ri link oddiy foydalanuvchi uchun yopilgan. Faylni saytdagi yuklash tugmasi orqali qayta oling."
-                )
-                return
-
-            game_key = await redeem_download_ticket(start_payload)
+        game_key = await redeem_download_ticket(start_payload)
 
         if not game_key:
             await message.answer(
