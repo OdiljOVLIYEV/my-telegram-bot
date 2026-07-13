@@ -172,7 +172,7 @@ async def command_start_handler(message: Message, state: FSMContext):
 
         game = await db.find_one({"key": game_key})
         if game:
-            await message.answer(f"<b>{game['name']}</b> (ID: {game['id']}) yuborilmoqda...", parse_mode="HTML")
+            await message.answer(f"<b>{game['name']}</b> yuborilmoqda...", parse_mode="HTML")
             for file_id in game['files']:
                 try:
                     await bot.send_document(chat_id=message.chat.id, document=file_id)
