@@ -95,6 +95,8 @@ async def start_web_server():
 class AdminStates(StatesGroup):
     waiting_for_name = State()
     waiting_for_files = State()
+    waiting_for_addfile_game = State()
+    waiting_for_addfile_files = State()
     waiting_for_delete = State()
 
 async def get_main_menu():
@@ -244,6 +246,81 @@ async def save_game(message: Message, state: FSMContext):
     menu = await get_main_menu()
     await msg.edit_text(f"🎉 Saqlandi! (ID: {game['id']})\n🔗 Link: <code>{link}</code>", parse_mode="HTML")
     await message.answer("Asosiy menyu:", reply_markup=menu)
+
+# --- QO'SHIMCHA FAYL QO'SHISH ---
+@dp.message(Command("addfile"), StateFilter("*"))
+async def add_file_start(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await message.answer("Siz admin emassiz!")
+        return
+
+    games = await db.find_all()
+    if not games:
+        await message.answer("Baza bo'sh! Avval /addgame bilan o'yin qo'shing.")
+        return
+
+    await state.clear()
+    buttons = [[KeyboardButton(text=game['name'])] for game in games]
+    buttons.append([KeyboardButton(text="вќЊ Bekor qilish")])
+    keyboard = ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+
+    await message.answer("Qaysi o'yinga qo'shimcha fayl qo'shilsin?", reply_markup=keyboard)
+    await state.set_state(AdminStates.waiting_for_addfile_game)
+
+@dp.message(AdminStates.waiting_for_addfile_game)
+async def process_addfile_game(message: Message, state: FSMContext):
+    if message.text == "вќЊ Bekor qilish":
+        menu = await get_main_menu()
+        await state.clear()
+        await message.answer("Amal bekor qilindi.", reply_markup=menu)
+        return
+
+    game = await db.find_one({"name": message.text})
+    if not game:
+        await message.answer("Bunday o'yin topilmadi. Ro'yxatdan tanlang.")
+        return
+
+    await state.update_data(
+        addfile_game_name=game["name"],
+        addfile_existing_files=game.get("files", []),
+        addfile_new_files=[]
+    )
+    await message.answer(
+        f"рџ“Ґ '{game['name']}' uchun qo'shimcha fayllarni yuboring. Tugatgach /done_addfile deb yozing.",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    await state.set_state(AdminStates.waiting_for_addfile_files)
+
+@dp.message(AdminStates.waiting_for_addfile_files, F.document | F.video | F.audio)
+async def collect_addfile_files(message: Message, state: FSMContext):
+    data = await state.get_data()
+    fid = message.document.file_id if message.document else (message.video.file_id if message.video else message.audio.file_id)
+    files = data.get('addfile_new_files', [])
+    files.append(fid)
+    await state.update_data(addfile_new_files=files)
+    await message.answer(f"вњ… {len(files)} ta qo'shimcha fayl yig'ildi.")
+
+@dp.message(AdminStates.waiting_for_addfile_files, Command("done_addfile"))
+async def save_addfile_files(message: Message, state: FSMContext):
+    data = await state.get_data()
+    game_name = data.get('addfile_game_name')
+    existing_files = data.get('addfile_existing_files', [])
+    new_files = data.get('addfile_new_files', [])
+
+    if not game_name or not new_files:
+        await message.answer("Xatolik: yangi qo'shiladigan fayllar topilmadi.")
+        await state.clear()
+        return
+
+    merged_files = existing_files + new_files
+    await db.update_one({"name": game_name}, {"files": merged_files}, upsert=False)
+
+    menu = await get_main_menu()
+    await state.clear()
+    await message.answer(
+        f"вњ… '{game_name}' ga {len(new_files)} ta qo'shimcha fayl qo'shildi.\nJami fayllar: {len(merged_files)} ta.",
+        reply_markup=menu
+    )
 
 # --- RO'YXAT ---
 @dp.message(Command("list", "links"), StateFilter("*"))
