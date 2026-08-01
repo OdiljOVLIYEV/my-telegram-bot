@@ -97,6 +97,8 @@ class AdminStates(StatesGroup):
     waiting_for_files = State()
     waiting_for_addfile_game = State()
     waiting_for_addfile_files = State()
+    waiting_for_removefile_game = State()
+    waiting_for_removefile_index = State()
     waiting_for_delete = State()
 
 async def get_main_menu():
@@ -319,6 +321,86 @@ async def save_addfile_files(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(
         f"вњ… '{game_name}' ga {len(new_files)} ta qo'shimcha fayl qo'shildi.\nJami fayllar: {len(merged_files)} ta.",
+        reply_markup=menu
+    )
+
+# --- FAYLNI OLIB TASHLASH ---
+@dp.message(Command("removefile"), StateFilter("*"))
+async def remove_file_start(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await message.answer("Siz admin emassiz!")
+        return
+
+    games = await db.find_all()
+    if not games:
+        await message.answer("Baza bo'sh!")
+        return
+
+    await state.clear()
+    buttons = [[KeyboardButton(text=game['name'])] for game in games]
+    buttons.append([KeyboardButton(text="Bekor qilish")])
+    keyboard = ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+
+    await message.answer("Qaysi o'yindan fayl o'chirilsin?", reply_markup=keyboard)
+    await state.set_state(AdminStates.waiting_for_removefile_game)
+
+@dp.message(AdminStates.waiting_for_removefile_game)
+async def process_removefile_game(message: Message, state: FSMContext):
+    if message.text == "Bekor qilish":
+        menu = await get_main_menu()
+        await state.clear()
+        await message.answer("Amal bekor qilindi.", reply_markup=menu)
+        return
+
+    game = await db.find_one({"name": message.text})
+    if not game:
+        await message.answer("Bunday o'yin topilmadi. Ro'yxatdan tanlang.")
+        return
+
+    files = game.get("files", [])
+    if not files:
+        menu = await get_main_menu()
+        await state.clear()
+        await message.answer(f"'{game['name']}' uchun fayl topilmadi.", reply_markup=menu)
+        return
+
+    await state.update_data(removefile_game_name=game["name"], removefile_files=files)
+    file_lines = [f"{index + 1}. {file_id}" for index, file_id in enumerate(files)]
+    await message.answer(
+        f"'{game['name']}' fayllari:\n\n" + "\n".join(file_lines) + "\n\nO'chirish uchun fayl raqamini kiriting:",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    await state.set_state(AdminStates.waiting_for_removefile_index)
+
+@dp.message(AdminStates.waiting_for_removefile_index)
+async def process_removefile_index(message: Message, state: FSMContext):
+    raw_value = (message.text or '').strip()
+    if raw_value.lower() in {"bekor qilish", "bekor", "cancel"}:
+        menu = await get_main_menu()
+        await state.clear()
+        await message.answer("Amal bekor qilindi.", reply_markup=menu)
+        return
+
+    if not raw_value.isdigit():
+        await message.answer("Faqat fayl raqamini kiriting. Masalan: 1")
+        return
+
+    data = await state.get_data()
+    game_name = data.get("removefile_game_name")
+    files = list(data.get("removefile_files", []))
+    file_index = int(raw_value) - 1
+
+    if file_index < 0 or file_index >= len(files):
+        await message.answer("Bunday fayl raqami yo'q. Qayta kiriting.")
+        return
+
+    removed_file_id = files.pop(file_index)
+    await db.update_one({"name": game_name}, {"files": files}, upsert=False)
+
+    menu = await get_main_menu()
+    await state.clear()
+    await message.answer(
+        f"'{game_name}' dan {file_index + 1}-fayl olib tashlandi.\nQolgan fayllar: {len(files)} ta.\n\nO'chirilgan file_id:\n{removed_file_id}",
         reply_markup=menu
     )
 
