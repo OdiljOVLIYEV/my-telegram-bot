@@ -99,6 +99,9 @@ class AdminStates(StatesGroup):
     waiting_for_addfile_files = State()
     waiting_for_removefile_game = State()
     waiting_for_removefile_index = State()
+    waiting_for_renamefile_game = State()
+    waiting_for_renamefile_index = State()
+    waiting_for_renamefile_name = State()
     waiting_for_delete = State()
 
 async def get_main_menu():
@@ -461,6 +464,114 @@ async def process_removefile_index(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(
         f"'{game_name}' dan {file_index + 1}-fayl olib tashlandi.\nQolgan fayllar: {len(files)} ta.\n\nO'chirilgan fayl:\n{removed_file.get('file_name', 'noma?lum fayl')}",
+        reply_markup=menu
+    )
+
+
+# --- FAYL NOMINI O'ZGARTIRISH ---
+@dp.message(Command("renamefile"), StateFilter("*"))
+async def rename_file_start(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await message.answer("Siz admin emassiz!")
+        return
+
+    games = await db.find_all()
+    if not games:
+        await message.answer("Baza bo'sh!")
+        return
+
+    await state.clear()
+    buttons = [[KeyboardButton(text=game['name'])] for game in games]
+    buttons.append([KeyboardButton(text="Bekor qilish")])
+    keyboard = ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+
+    await message.answer("Qaysi o'yindagi fayl nomini o'zgartirasiz?", reply_markup=keyboard)
+    await state.set_state(AdminStates.waiting_for_renamefile_game)
+
+@dp.message(AdminStates.waiting_for_renamefile_game)
+async def process_renamefile_game(message: Message, state: FSMContext):
+    if message.text == "Bekor qilish":
+        menu = await get_main_menu()
+        await state.clear()
+        await message.answer("Amal bekor qilindi.", reply_markup=menu)
+        return
+
+    game = await db.find_one({"name": message.text})
+    if not game:
+        await message.answer("Bunday o'yin topilmadi. Ro'yxatdan tanlang.")
+        return
+
+    files = normalize_file_entries(game.get("files", []))
+    if not files:
+        menu = await get_main_menu()
+        await state.clear()
+        await message.answer(f"'{game['name']}' uchun fayl topilmadi.", reply_markup=menu)
+        return
+
+    await state.update_data(renamefile_game_name=game["name"], renamefile_files=files)
+    file_lines = [f"{index + 1}. {file_entry.get('file_name', f'file_{index + 1}')}" for index, file_entry in enumerate(files)]
+    await message.answer(
+        f"'{game['name']}' fayllari:\n\n" + "\n".join(file_lines) + "\n\nNomini o'zgartirish uchun fayl raqamini kiriting:",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    await state.set_state(AdminStates.waiting_for_renamefile_index)
+
+@dp.message(AdminStates.waiting_for_renamefile_index)
+async def process_renamefile_index(message: Message, state: FSMContext):
+    raw_value = (message.text or '').strip()
+    if raw_value.lower() in {"bekor qilish", "bekor", "cancel"}:
+        menu = await get_main_menu()
+        await state.clear()
+        await message.answer("Amal bekor qilindi.", reply_markup=menu)
+        return
+
+    if not raw_value.isdigit():
+        await message.answer("Faqat fayl raqamini kiriting. Masalan: 1")
+        return
+
+    data = await state.get_data()
+    files = list(data.get("renamefile_files", []))
+    file_index = int(raw_value) - 1
+
+    if file_index < 0 or file_index >= len(files):
+        await message.answer("Bunday fayl raqami yo'q. Qayta kiriting.")
+        return
+
+    selected_file = files[file_index]
+    await state.update_data(renamefile_selected_index=file_index)
+    await message.answer(
+        f"Yangi nomni kiriting:\n\nEski nom: {selected_file.get('file_name', f'file_{file_index + 1}')}",
+
+        reply_markup=ReplyKeyboardRemove()
+    )
+    await state.set_state(AdminStates.waiting_for_renamefile_name)
+
+@dp.message(AdminStates.waiting_for_renamefile_name)
+async def process_renamefile_name(message: Message, state: FSMContext):
+    new_name = (message.text or '').strip()
+    if not new_name:
+        await message.answer("Yangi nom bo'sh bo'lmasin.")
+        return
+
+    data = await state.get_data()
+    game_name = data.get("renamefile_game_name")
+    files = list(data.get("renamefile_files", []))
+    file_index = data.get("renamefile_selected_index")
+
+    if game_name is None or file_index is None or file_index < 0 or file_index >= len(files):
+        menu = await get_main_menu()
+        await state.clear()
+        await message.answer("Holat topilmadi. Qaytadan urinib ko'ring.", reply_markup=menu)
+        return
+
+    old_name = files[file_index].get('file_name', f'file_{file_index + 1}')
+    files[file_index]['file_name'] = new_name
+    await db.update_one({"name": game_name}, {"files": files}, upsert=False)
+
+    menu = await get_main_menu()
+    await state.clear()
+    await message.answer(
+        f"Fayl nomi yangilandi.\n\nEski nom: {old_name}\nYangi nom: {new_name}",
         reply_markup=menu
     )
 
