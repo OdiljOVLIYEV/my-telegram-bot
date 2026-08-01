@@ -151,6 +151,60 @@ async def redeem_download_ticket(ticket: str):
 def is_download_ticket_payload(payload: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z0-9_-]{32}", (payload or "").strip()))
 
+def extract_file_entry(message: Message):
+    if message.document:
+        return {
+            "file_id": message.document.file_id,
+            "file_name": message.document.file_name or "document",
+            "kind": "document"
+        }
+    if message.video:
+        return {
+            "file_id": message.video.file_id,
+            "file_name": message.video.file_name or f"video_{message.video.file_unique_id}.mp4",
+            "kind": "video"
+        }
+    if message.audio:
+        title = message.audio.title or message.audio.file_name or f"audio_{message.audio.file_unique_id}.mp3"
+        return {
+            "file_id": message.audio.file_id,
+            "file_name": title,
+            "kind": "audio"
+        }
+    return None
+
+def normalize_file_entries(files):
+    normalized = []
+    for index, item in enumerate(files or []):
+        if isinstance(item, dict):
+            file_id = item.get("file_id")
+            if not file_id:
+                continue
+            normalized.append({
+                "file_id": file_id,
+                "file_name": item.get("file_name") or f"file_{index + 1}",
+                "kind": item.get("kind") or "document"
+            })
+        elif isinstance(item, str):
+            normalized.append({
+                "file_id": item,
+                "file_name": f"file_{index + 1}",
+                "kind": "document"
+            })
+    return normalized
+
+async def send_stored_file(chat_id: int, file_entry):
+    normalized = normalize_file_entries([file_entry])
+    if not normalized:
+        return
+    item = normalized[0]
+    if item["kind"] == "video":
+        await bot.send_video(chat_id=chat_id, video=item["file_id"])
+    elif item["kind"] == "audio":
+        await bot.send_audio(chat_id=chat_id, audio=item["file_id"])
+    else:
+        await bot.send_document(chat_id=chat_id, document=item["file_id"])
+
 # --- START BUYRUQ ---
 @dp.message(CommandStart(), StateFilter("*"))
 async def command_start_handler(message: Message, state: FSMContext):
@@ -177,9 +231,9 @@ async def command_start_handler(message: Message, state: FSMContext):
         game = await db.find_one({"key": game_key})
         if game:
             await message.answer(f"<b>{game['name']}</b> yuborilmoqda...", parse_mode="HTML")
-            for file_id in game['files']:
+            for file_entry in normalize_file_entries(game.get('files', [])):
                 try:
-                    await bot.send_document(chat_id=message.chat.id, document=file_id)
+                    await send_stored_file(message.chat.id, file_entry)
                     await asyncio.sleep(0.5)
                 except Exception as e:
                     logging.error(f"Fayl yuborishda xato: {e}")
@@ -220,11 +274,14 @@ async def process_name(message: Message, state: FSMContext):
 @dp.message(AdminStates.waiting_for_files, F.document | F.video | F.audio)
 async def collect_files(message: Message, state: FSMContext):
     data = await state.get_data()
-    fid = message.document.file_id if message.document else (message.video.file_id if message.video else message.audio.file_id)
+    file_entry = extract_file_entry(message)
+    if not file_entry:
+        await message.answer("Fayl aniqlanmadi.")
+        return
     files = data.get('files', [])
-    files.append(fid)
+    files.append(file_entry)
     await state.update_data(files=files)
-    await message.answer(f"✅ {len(files)}-fayl qo'shildi.")
+    await message.answer(f"Fayl qo'shildi: {file_entry['file_name']}")
 
 @dp.message(AdminStates.waiting_for_files, Command("done"))
 async def save_game(message: Message, state: FSMContext):
@@ -284,7 +341,7 @@ async def process_addfile_game(message: Message, state: FSMContext):
 
     await state.update_data(
         addfile_game_name=game["name"],
-        addfile_existing_files=game.get("files", []),
+        addfile_existing_files=normalize_file_entries(game.get("files", [])),
         addfile_new_files=[]
     )
     await message.answer(
@@ -296,11 +353,14 @@ async def process_addfile_game(message: Message, state: FSMContext):
 @dp.message(AdminStates.waiting_for_addfile_files, F.document | F.video | F.audio)
 async def collect_addfile_files(message: Message, state: FSMContext):
     data = await state.get_data()
-    fid = message.document.file_id if message.document else (message.video.file_id if message.video else message.audio.file_id)
+    file_entry = extract_file_entry(message)
+    if not file_entry:
+        await message.answer("Fayl aniqlanmadi.")
+        return
     files = data.get('addfile_new_files', [])
-    files.append(fid)
+    files.append(file_entry)
     await state.update_data(addfile_new_files=files)
-    await message.answer(f"вњ… {len(files)} ta qo'shimcha fayl yig'ildi.")
+    await message.answer(f"Qo'shimcha fayl yig'ildi: {file_entry['file_name']}")
 
 @dp.message(AdminStates.waiting_for_addfile_files, Command("done_addfile"))
 async def save_addfile_files(message: Message, state: FSMContext):
@@ -357,7 +417,7 @@ async def process_removefile_game(message: Message, state: FSMContext):
         await message.answer("Bunday o'yin topilmadi. Ro'yxatdan tanlang.")
         return
 
-    files = game.get("files", [])
+    files = normalize_file_entries(game.get("files", []))
     if not files:
         menu = await get_main_menu()
         await state.clear()
@@ -365,7 +425,7 @@ async def process_removefile_game(message: Message, state: FSMContext):
         return
 
     await state.update_data(removefile_game_name=game["name"], removefile_files=files)
-    file_lines = [f"{index + 1}. {file_id}" for index, file_id in enumerate(files)]
+    file_lines = [f"{index + 1}. {file_entry.get('file_name', f'file_{index + 1}')}" for index, file_entry in enumerate(files)]
     await message.answer(
         f"'{game['name']}' fayllari:\n\n" + "\n".join(file_lines) + "\n\nO'chirish uchun fayl raqamini kiriting:",
         reply_markup=ReplyKeyboardRemove()
@@ -394,13 +454,13 @@ async def process_removefile_index(message: Message, state: FSMContext):
         await message.answer("Bunday fayl raqami yo'q. Qayta kiriting.")
         return
 
-    removed_file_id = files.pop(file_index)
+    removed_file = files.pop(file_index)
     await db.update_one({"name": game_name}, {"files": files}, upsert=False)
 
     menu = await get_main_menu()
     await state.clear()
     await message.answer(
-        f"'{game_name}' dan {file_index + 1}-fayl olib tashlandi.\nQolgan fayllar: {len(files)} ta.\n\nO'chirilgan file_id:\n{removed_file_id}",
+        f"'{game_name}' dan {file_index + 1}-fayl olib tashlandi.\nQolgan fayllar: {len(files)} ta.\n\nO'chirilgan fayl:\n{removed_file.get('file_name', 'noma?lum fayl')}",
         reply_markup=menu
     )
 
@@ -499,10 +559,10 @@ async def handle_game_buttons(message: Message):
 
     game = await db.find_one({"name": message.text})
     if game:
-        await message.answer(f"🚀 {game['name']} (ID: {game['id']}) yuborilmoqda...")
-        for fid in game['files']:
+        await message.answer(f"O'yin yuborilmoqda: {game['name']} (ID: {game['id']})")
+        for file_entry in normalize_file_entries(game.get('files', [])):
             try:
-                await bot.send_document(chat_id=message.chat.id, document=fid)
+                await send_stored_file(message.chat.id, file_entry)
                 await asyncio.sleep(0.5)
             except Exception as e:
                 logging.error(f"Xato: {e}")
