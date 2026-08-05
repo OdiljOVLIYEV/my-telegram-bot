@@ -171,6 +171,7 @@ async def complete_telegram_registration(token: str, message: Message):
     payload = {
         "token": token,
         "telegram_chat_id": str(message.chat.id),
+        "telegram_user_id": str(message.from_user.id),
         "telegram_username": message.from_user.username or ""
     }
     try:
