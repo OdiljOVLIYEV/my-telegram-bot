@@ -24,6 +24,7 @@ BOT_USERNAME = os.getenv("BOT_USERNAME", "uz_filtr_fayl_bot")
 PORT = int(os.getenv("PORT", 8080))
 UZGAMECORE_API_URL = os.getenv("UZGAMECORE_API_URL", "https://uzgamecore.uz").rstrip("/")
 DOWNLOAD_TICKET_BOT_SECRET = os.getenv("DOWNLOAD_TICKET_BOT_SECRET", "").strip()
+TELEGRAM_BOT_VERIFY_SECRET = os.getenv("TELEGRAM_BOT_VERIFY_SECRET", DOWNLOAD_TICKET_BOT_SECRET).strip()
 
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
@@ -154,6 +155,40 @@ async def redeem_download_ticket(ticket: str):
 def is_download_ticket_payload(payload: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z0-9_-]{32}", (payload or "").strip()))
 
+def is_registration_ticket_payload(payload: str) -> bool:
+    return bool(re.fullmatch(r"reg_[A-Za-z0-9_-]{20,}", (payload or "").strip()))
+
+async def complete_telegram_registration(token: str, message: Message):
+    if not TELEGRAM_BOT_VERIFY_SECRET:
+        logging.error("TELEGRAM_BOT_VERIFY_SECRET o'rnatilmagan.")
+        return None
+
+    timeout = aiohttp.ClientTimeout(total=10)
+    headers = {
+        "Authorization": f"Bearer {TELEGRAM_BOT_VERIFY_SECRET}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "token": token,
+        "telegram_chat_id": str(message.chat.id),
+        "telegram_username": message.from_user.username or ""
+    }
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                f"{UZGAMECORE_API_URL}/api/auth/telegram/complete-registration",
+                headers=headers,
+                json=payload
+            ) as response:
+                data = await response.json(content_type=None)
+                if response.status != 200:
+                    logging.warning("Telegram registration verify failed: status=%s payload=%s", response.status, data)
+                    return {"success": False, "payload": data, "status": response.status}
+                return {"success": True, "payload": data, "status": response.status}
+    except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+        logging.error("Telegram registration API bilan aloqa xatosi: %s", error)
+        return None
+
 def extract_file_entry(message: Message):
     if message.document:
         return {
@@ -217,6 +252,23 @@ async def command_start_handler(message: Message, state: FSMContext):
     
     if len(args) > 1:
         start_payload = args[1].strip()
+        if is_registration_ticket_payload(start_payload):
+            verification = await complete_telegram_registration(start_payload, message)
+            if verification and verification.get("success"):
+                await message.answer(
+                    "Registratsiya tasdiqlandi. Endi saytga qaytib email va parolingiz bilan login qiling."
+                )
+                return
+
+            error_code = verification.get("payload", {}).get("error") if verification else None
+            if error_code == "REGISTRATION_TOKEN_EXPIRED":
+                await message.answer("Registratsiya linki eskirgan. Saytda qayta ro'yxatdan o'ting.")
+            elif error_code == "ACCOUNT_ALREADY_EXISTS":
+                await message.answer("Bu registratsiya allaqachon ishlatilgan yoki akkaunt yaratilgan. Saytda login qilib ko'ring.")
+            else:
+                await message.answer("Registratsiyani tasdiqlab bo'lmadi. Saytdan qayta urinib ko'ring.")
+            return
+
         if not is_download_ticket_payload(start_payload):
             await message.answer(
                 "Bu link ishlamaydi."
