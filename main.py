@@ -158,6 +158,41 @@ def is_download_ticket_payload(payload: str) -> bool:
 def is_registration_ticket_payload(payload: str) -> bool:
     return bool(re.fullmatch(r"reg_[A-Za-z0-9_-]{20,}", (payload or "").strip()))
 
+def is_pre_registration_ticket_payload(payload: str) -> bool:
+    return bool(re.fullmatch(r"tgs_[A-Za-z0-9_-]{20,}", (payload or "").strip()))
+
+async def verify_register_session(token: str, message: Message):
+    if not TELEGRAM_BOT_VERIFY_SECRET:
+        logging.error("TELEGRAM_BOT_VERIFY_SECRET o'rnatilmagan.")
+        return None
+
+    timeout = aiohttp.ClientTimeout(total=10)
+    headers = {
+        "Authorization": f"Bearer {TELEGRAM_BOT_VERIFY_SECRET}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "token": token,
+        "telegram_chat_id": str(message.chat.id),
+        "telegram_user_id": str(message.from_user.id),
+        "telegram_username": message.from_user.username or ""
+    }
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                f"{UZGAMECORE_API_URL}/api/auth/telegram/verify-register-session",
+                headers=headers,
+                json=payload
+            ) as response:
+                data = await response.json(content_type=None)
+                if response.status != 200:
+                    logging.warning("Telegram pre-registration verify failed: status=%s payload=%s", response.status, data)
+                    return {"success": False, "payload": data, "status": response.status}
+                return {"success": True, "payload": data, "status": response.status}
+    except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+        logging.error("Telegram pre-registration API bilan aloqa xatosi: %s", error)
+        return None
+
 async def complete_telegram_registration(token: str, message: Message):
     if not TELEGRAM_BOT_VERIFY_SECRET:
         logging.error("TELEGRAM_BOT_VERIFY_SECRET o'rnatilmagan.")
@@ -253,6 +288,23 @@ async def command_start_handler(message: Message, state: FSMContext):
     
     if len(args) > 1:
         start_payload = args[1].strip()
+        if is_pre_registration_ticket_payload(start_payload):
+            verification = await verify_register_session(start_payload, message)
+            if verification and verification.get("success"):
+                await message.answer(
+                    "Telegram tasdiqlandi. Endi saytga qaytib register formasini to'ldiring."
+                )
+                return
+            if verification and verification.get("payload"):
+                payload = verification["payload"]
+                await message.answer(
+                    payload.get("message")
+                    or payload.get("error")
+                    or "TG tasdiqlashni yakunlab bo'lmadi."
+                )
+                return
+            await message.answer("TG tasdiqlash servisiga ulanib bo'lmadi. Keyinroq urinib ko'ring.")
+            return
         if is_registration_ticket_payload(start_payload):
             verification = await complete_telegram_registration(start_payload, message)
             if verification and verification.get("success"):
