@@ -292,7 +292,7 @@ async def command_start_handler(message: Message, state: FSMContext):
             verification = await verify_register_session(start_payload, message)
             if verification and verification.get("success"):
                 await message.answer(
-                    "Telegram tasdiqlandi. Endi saytga qaytib register formasini to'ldiring."
+                    "Telegram tasdiqlandi. Endi saytga qayting: agar akkauntingiz bo'lsa login qiling, bo'lmasa yangi akkaunt oching."
                 )
                 return
             if verification and verification.get("payload"):
