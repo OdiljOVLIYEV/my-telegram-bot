@@ -291,6 +291,12 @@ async def command_start_handler(message: Message, state: FSMContext):
         if is_pre_registration_ticket_payload(start_payload):
             verification = await verify_register_session(start_payload, message)
             if verification and verification.get("success"):
+                result_status = str((verification.get("payload") or {}).get("status") or "").lower()
+                if result_status == "linked":
+                    await message.answer(
+                        "Telegram akkauntingiz sayt hisobiga bog‘landi. Endi saytga qayting va yuklash tugmasini yana bosing."
+                    )
+                    return
                 await message.answer(
                     "Telegram tasdiqlandi. Endi saytga qayting: agar akkauntingiz bo'lsa login qiling, bo'lmasa yangi akkaunt oching."
                 )
